@@ -12,3 +12,5 @@ Rplots.pdf
 *.synctex.gz
 report/*.tex
 report/figure/
+report/copper_report.pdf
+report/_*.png

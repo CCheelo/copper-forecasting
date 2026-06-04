@@ -14,14 +14,15 @@
 \usepackage{enumitem}
 \usepackage[hidelinks]{hyperref}
 
-\definecolor{accent}{HTML}{C2410C}
-\definecolor{ink}{HTML}{1F2937}
-\captionsetup{font=small,labelfont={bf,color=accent}}
+% all text black per request (accent/ink retained as names but defined black)
+\definecolor{accent}{HTML}{000000}
+\definecolor{ink}{HTML}{000000}
+\captionsetup{font=small,labelfont=bf}
 
-% coloured section headings to match the portfolio palette
-\titleformat{\section}{\Large\bfseries\color{accent}}{\thesection}{0.6em}{}
-\titleformat{\subsection}{\large\bfseries\color{ink}}{\thesubsection}{0.6em}{}
-\titleformat{\subsubsection}{\normalsize\bfseries\color{ink}}{\thesubsubsection}{0.6em}{}
+% section headings: black, bold
+\titleformat{\section}{\Large\bfseries}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{0.6em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{0.6em}{}
 
 \pagestyle{fancy}
 \fancyhf{}
@@ -40,7 +41,7 @@
 library(knitr)
 opts_chunk$set(echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',
                fig.width=7, fig.height=3.3, out.width='0.96\\linewidth',
-               fig.pos='H', size='small', dev='pdf')
+               fig.pos='H', size='small', dev='pdf', highlight=FALSE)
 options(width=92, digits=5, scipen=6)
 suppressPackageStartupMessages({
   library(readxl); library(tseries); library(forecast)
@@ -132,24 +133,39 @@ cmp <- data.frame(
 % ============================ TITLE PAGE ============================
 \begin{titlepage}
 \centering
-\vspace*{1.2cm}
-{\large\color{accent}\bfseries TIME-SERIES ECONOMETRICS\par}
-\vspace{0.4cm}
-\rule{\linewidth}{0.4pt}\par
-\vspace{0.9cm}
-{\LARGE\bfseries Time-Series Modelling and Forecasting of\\[0.2cm] Daily Copper Prices\par}
-\vspace{0.5cm}
-{\large An ARMA Model with a GARCH Extension\par}
-\vspace{0.9cm}
-\rule{\linewidth}{0.4pt}\par
-\vspace{1.6cm}
-{\large\bfseries Choolwe Cheelo\par}
-\vspace{0.2cm}
-{BSc Actuarial Science\par}
-\vspace{2.0cm}
+\vspace*{0.6cm}
 
-\begin{minipage}{0.86\linewidth}\small
-\textbf{Abstract.} Copper is the cornerstone of the Zambian economy, consistently
+{\Large\bfseries THE UNIVERSITY OF ZAMBIA\par}
+\vspace{0.30cm}
+{\large\bfseries THE SCHOOL OF NATURAL SCIENCES\par}
+\vspace{0.20cm}
+{\large\bfseries THE DEPARTMENT OF MATHEMATICS,\\[0.15cm] STATISTICS AND ACTUARIAL SCIENCE\par}
+
+\vspace{0.9cm}
+\includegraphics[width=3.7cm]{unza.jpg}\par
+\vspace{1.0cm}
+
+\rule{\linewidth}{0.4pt}\par
+\vspace{0.9cm}
+{\Huge\bfseries Time-Series Modelling and\\[0.25cm] Forecasting of Daily Copper Prices\par}
+\vspace{0.6cm}
+{\LARGE An ARMA Model with a GARCH Extension\par}
+\vspace{0.9cm}
+\rule{\linewidth}{0.4pt}\par
+
+\vspace{1.8cm}
+{\Large\bfseries Choolwe Cheelo\par}
+\vspace{0.3cm}
+{\large BSc Actuarial Science\par}
+
+\vfill
+{\small Academic project --- 2025\par}
+\end{titlepage}
+
+% ============================ ABSTRACT (page 2) ============================
+\section*{Abstract}
+\addcontentsline{toc}{section}{Abstract}
+Copper is the cornerstone of the Zambian economy, consistently
 accounting for the bulk of national export earnings, so the statistical behaviour of its
 price is of direct fiscal and commercial interest. This study models
 \Sexpr{format(nrow(cu),big.mark=",")} daily copper prices (US\$/tonne) spanning
@@ -168,12 +184,8 @@ volatility ($\alpha_1+\beta_1=\Sexpr{round(pers,3)}$) and the fat tails
 ($t$ d.f.\ $\approx\Sexpr{round(tdf,1)}$) characteristic of commodity returns. The results
 imply that copper prices are close to weak-form efficient in the mean, while their
 \emph{risk} is highly predictable --- the practically useful object to forecast.
-\end{minipage}
 
-\vfill
-{\small Academic project --- 2025\par}
-\end{titlepage}
-
+\newpage
 \tableofcontents
 \newpage
 
