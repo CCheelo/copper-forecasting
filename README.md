@@ -108,6 +108,7 @@ copper-forecasting/
 │   └── copper_analysis.R                # full, commented analysis (ARMA + backtest + GARCH)
 ├── report/
 │   ├── copper_report.Rnw                # literate source (LaTeX + R)
+│   ├── unza.jpg                          # UNZA crest used on the title page
 │   └── copper-forecasting-report.pdf    # compiled report
 ├── figures/                             # generated plots (PNG)
 └── README.md
