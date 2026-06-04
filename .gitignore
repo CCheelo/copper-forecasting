@@ -1,0 +1,14 @@
+﻿# R
+.Rhistory
+.RData
+.Rproj.user/
+Rplots.pdf
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+report/*.tex
+report/figure/

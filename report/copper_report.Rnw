@@ -1,0 +1,605 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{accent}{HTML}{C2410C}
+\definecolor{ink}{HTML}{1F2937}
+\captionsetup{font=small,labelfont={bf,color=accent}}
+
+% coloured section headings to match the portfolio palette
+\titleformat{\section}{\Large\bfseries\color{accent}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries\color{ink}}{\thesubsection}{0.6em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\color{ink}}{\thesubsubsection}{0.6em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\lhead{\small\color{accent}Modelling Daily Copper Prices}
+\rhead{\small Choolwe Cheelo}
+\cfoot{\thepage}
+
+\setlength{\parskip}{0.6em}
+\setlength{\parindent}{0pt}
+\hypersetup{colorlinks=true,linkcolor=accent,urlcolor=accent}
+
+\begin{document}
+
+<<setup, include=FALSE>>=
+library(knitr)
+opts_chunk$set(echo=FALSE, message=FALSE, warning=FALSE, fig.align='center',
+               fig.width=7, fig.height=3.3, out.width='0.96\\linewidth',
+               fig.pos='H', size='small', dev='pdf')
+options(width=92, digits=5, scipen=6)
+suppressPackageStartupMessages({
+  library(readxl); library(tseries); library(forecast)
+  library(lmtest);  library(FinTS);  library(rugarch)
+})
+
+## ---- locate the data file (works from Copper/, the repo root, or repo/data) ----
+find_data <- function(){
+  cands <- c("Daily copper with dates.xlsx",
+             file.path("data","Daily copper with dates.xlsx"),
+             file.path("..","data","Daily copper with dates.xlsx"),
+             "c:/Users/hp/Downloads/website/portfolio-website/Copper/Daily copper with dates.xlsx")
+  hit <- cands[file.exists(cands)]
+  if(!length(hit)) stop("Cannot find 'Daily copper with dates.xlsx'"); hit[1]
+}
+
+## ---- load & clean ----
+raw <- read_excel(find_data(), sheet="Sheet1", skip=2)
+names(raw) <- c("Date","Price")
+raw$Date <- as.Date(raw$Date); raw$Price <- as.numeric(raw$Price)
+raw <- raw[!is.na(raw$Date) & !is.na(raw$Price), ]
+n_raw <- nrow(raw)
+lt <- as.POSIXlt(raw$Date); bad <- (lt$year+1900) < 2000
+n_typo <- sum(bad); lt$year[bad] <- lt$year[bad] + 100; raw$Date <- as.Date(lt)
+raw <- raw[order(raw$Date), ]
+n_dup <- sum(duplicated(raw$Date))
+cu <- raw[!duplicated(raw$Date), ]
+price <- cu$Price
+ret   <- diff(log(price))*100
+N <- length(ret)
+
+## ---- stationarity ----
+adf_lvl <- suppressWarnings(adf.test(price)); kpss_lvl <- suppressWarnings(kpss.test(price))
+adf_ret <- suppressWarnings(adf.test(ret));   kpss_ret <- suppressWarnings(kpss.test(ret))
+
+## ---- BIC grid ----
+grid <- expand.grid(p=0:5, q=0:5); gres <- data.frame()
+for(i in seq_len(nrow(grid))){
+  p<-grid$p[i]; q<-grid$q[i]
+  f<-tryCatch(arima(ret,order=c(p,0,q),include.mean=TRUE,method="ML"),
+              error=function(e)NULL, warning=function(w)NULL)
+  if(!is.null(f)) gres<-rbind(gres,data.frame(p=p,q=q,AIC=AIC(f),BIC=BIC(f)))
+}
+gres <- gres[order(gres$BIC),]
+
+## ---- ARMA(2,0) ----
+fit <- Arima(ret, order=c(2,0,0), include.mean=TRUE)
+res <- residuals(fit)
+lb_r   <- Box.test(res,20,"Ljung-Box",fitdf=2)
+lb_r2  <- Box.test(res^2,20,"Ljung-Box")
+arch_r <- ArchTest(res,12)
+jb_r   <- jarque.bera.test(res)
+
+## ---- out-of-sample backtest: last 252 trading days, fixed-coef 1-step ----
+H<-252; tr<-1:(N-H); te<-(N-H+1):N
+fit_tr  <- Arima(ret[tr], order=c(2,0,0), include.mean=TRUE)
+fit_all <- Arima(ret, model=fit_tr)
+pred_ret<- fitted(fit_all)[te]
+p_prev  <- price[te]; p_act <- price[te+1]
+p_arma  <- p_prev*exp(pred_ret/100); p_rw <- p_prev
+rmse<-function(a,f)sqrt(mean((a-f)^2)); mae<-function(a,f)mean(abs(a-f))
+bt <- data.frame(Model=c("ARMA(2,0)","Random walk"),
+                 RMSE=c(rmse(p_act,p_arma),rmse(p_act,p_rw)),
+                 MAE =c(mae(p_act,p_arma), mae(p_act,p_rw)))
+dir_acc <- 100*mean(sign(p_act-p_prev)==sign(p_arma-p_prev))
+
+## ---- ARMA(2,0)-GARCH(1,1)-t ----
+spec <- ugarchspec(variance.model=list(model="sGARCH",garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(2,0),include.mean=TRUE),
+                   distribution.model="std")
+fg <- ugarchfit(spec, data=ret, solver="hybrid")
+LLg <- as.numeric(likelihood(fg)); npg <- length(coef(fg))
+AICg <- -2*LLg+2*npg; BICg <- -2*LLg+log(N)*npg
+z  <- as.numeric(residuals(fg,standardize=TRUE))
+lbz<-Box.test(z,20,"Ljung-Box"); lbz2<-Box.test(z^2,20,"Ljung-Box"); archz<-ArchTest(z,12)
+pers <- as.numeric(sum(coef(fg)[c("alpha1","beta1")])); tdf <- as.numeric(coef(fg)["shape"])
+cv <- as.numeric(sigma(fg))   # conditional volatility (%/day)
+
+## comparison table
+cmp <- data.frame(
+  Model=c("ARMA(2,0)","ARMA(2,0)-GARCH(1,1)-t"),
+  Params=c(4,npg),
+  logLik=c(as.numeric(logLik(fit)),LLg),
+  AIC=c(AIC(fit),AICg), BIC=c(BIC(fit),BICg),
+  LB_z2_p=c(lb_r2$p.value,lbz2$p.value),
+  ARCH_p =c(arch_r$p.value,archz$p.value))
+@
+
+% ============================ TITLE PAGE ============================
+\begin{titlepage}
+\centering
+\vspace*{1.2cm}
+{\large\color{accent}\bfseries TIME-SERIES ECONOMETRICS\par}
+\vspace{0.4cm}
+\rule{\linewidth}{0.4pt}\par
+\vspace{0.9cm}
+{\LARGE\bfseries Time-Series Modelling and Forecasting of\\[0.2cm] Daily Copper Prices\par}
+\vspace{0.5cm}
+{\large An ARMA Model with a GARCH Extension\par}
+\vspace{0.9cm}
+\rule{\linewidth}{0.4pt}\par
+\vspace{1.6cm}
+{\large\bfseries Choolwe Cheelo\par}
+\vspace{0.2cm}
+{BSc Actuarial Science\par}
+\vspace{2.0cm}
+
+\begin{minipage}{0.86\linewidth}\small
+\textbf{Abstract.} Copper is the cornerstone of the Zambian economy, consistently
+accounting for the bulk of national export earnings, so the statistical behaviour of its
+price is of direct fiscal and commercial interest. This study models
+\Sexpr{format(nrow(cu),big.mark=",")} daily copper prices (US\$/tonne) spanning
+\Sexpr{format(min(cu$Date),"%b %Y")}--\Sexpr{format(max(cu$Date),"%b %Y")}. The price level is
+non-stationary, so the analysis works with daily log-returns. Following the Box--Jenkins
+methodology, the autocorrelation and partial-autocorrelation functions together with the
+Bayesian Information Criterion identify an \textbf{AR(2)} model for the conditional mean.
+The fitted ARMA(2,0) removes the linear dependence in returns, but its residuals display
+strong volatility clustering and heavy tails, and out of sample it does not outperform a
+naive random walk. The study therefore extends the specification to an
+\textbf{ARMA(2,0)--GARCH(1,1)} model with Student-$t$ innovations. The extension lowers the
+BIC from \Sexpr{format(round(BIC(fit)),big.mark=",")} to
+\Sexpr{format(round(BICg),big.mark=",")}, eliminates the autoregressive conditional
+heteroskedasticity from the standardised residuals, and captures both the persistence of
+volatility ($\alpha_1+\beta_1=\Sexpr{round(pers,3)}$) and the fat tails
+($t$ d.f.\ $\approx\Sexpr{round(tdf,1)}$) characteristic of commodity returns. The results
+imply that copper prices are close to weak-form efficient in the mean, while their
+\emph{risk} is highly predictable --- the practically useful object to forecast.
+\end{minipage}
+
+\vfill
+{\small Academic project --- 2025\par}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ============================ CHAPTER 1 ============================
+\section{Introduction}
+
+\subsection{Background}
+Copper is the single most important commodity in the Zambian economy, routinely
+contributing the majority of the country's foreign-exchange earnings and a substantial
+share of government revenue (World Bank, 2023). Because the national budget, the exchange
+rate and the mining sector's investment decisions are all sensitive to the copper price,
+understanding and forecasting that price is of considerable practical importance.
+
+Commodity prices such as copper are typically studied as financial time series. The seminal
+framework is that of Box and Jenkins (1976), who formalised the autoregressive
+moving-average (ARMA) class of models and an iterative \emph{identification--estimation--%
+diagnostic-checking} procedure for fitting them. A recurring empirical finding for prices of
+metals, equities and currencies is that, although the \emph{level} of a price is
+non-stationary and behaves much like a random walk, its \emph{volatility} is highly
+predictable: large changes tend to be followed by large changes and small by small. This
+``volatility clustering'' motivated the autoregressive conditional heteroskedasticity (ARCH)
+model of Engle (1982) and its generalisation, the GARCH model of Bollerslev (1986).
+
+\subsection{Statement of the Problem}
+A classical ARMA model assumes that the error variance is constant over time
+(homoskedasticity) and, for interval forecasts, that the errors are normally distributed.
+Daily commodity returns routinely violate both assumptions. If an analyst fits an ARMA model
+to copper returns and stops there, the point estimates may be reasonable but the standard
+errors, confidence intervals and any value-at-risk figures derived from the model will be
+unreliable, because the model has ignored the time-varying risk that dominates the data.
+This study asks two questions: \emph{(i)} what ARMA model best describes the conditional mean
+of daily copper returns, and \emph{(ii)} does explicitly modelling the conditional variance
+with a GARCH component materially improve the model?
+
+\subsection{Aim and Objectives}
+The aim is to build, validate and improve a time-series model for daily copper prices. The
+specific objectives are:
+\begin{enumerate}[nosep,leftmargin=1.4em]
+  \item to transform the price series to a stationary form suitable for ARMA modelling;
+  \item to identify and estimate an ARMA model for the conditional mean using the ACF, PACF
+        and the Bayesian Information Criterion (BIC);
+  \item to assess the adequacy of that model through residual diagnostics and out-of-sample
+        forecast accuracy; and
+  \item to extend the model with a GARCH component and quantify the resulting improvement.
+\end{enumerate}
+
+\subsection{Scope and Limitations}
+The study is univariate: it uses only the history of the copper price itself and does not
+incorporate macroeconomic or market covariates such as the US dollar index, Chinese
+industrial demand or inventory levels. The data are daily spot prices in US dollars per
+tonne; exchange-rate effects on the kwacha value of copper are outside the scope. The
+analysis is conducted entirely in R, ensuring full reproducibility.
+
+\subsection{Organisation of the Study}
+Section~2 describes the data and the methodology. Section~3 presents the ARMA modelling and
+its diagnostics --- the original analysis. Section~4 develops the GARCH extension and
+explains why it constitutes an improvement. Section~5 concludes. Full R output is reproduced
+in the appendix, and the complete code and data are available in the project repository.
+
+% ============================ CHAPTER 2 ============================
+\section{Data and Methodology}
+
+\subsection{Data}
+The dataset comprises \Sexpr{format(n_raw,big.mark=",")} daily observations of the copper
+price in US dollars per tonne. The magnitude and trajectory of the series (rising from
+roughly US\$1,800/tonne in 2000 to a peak above US\$10,800/tonne) are consistent with London
+Metal Exchange cash-settlement quotations. Three data-quality issues were corrected before
+analysis: \Sexpr{n_typo} dates had been keyed with the year 19xx instead of 20xx (the entire
+January--February 2022 block), which were shifted forward by one century; \Sexpr{n_dup}
+duplicate date was removed; and the series was sorted chronologically. The cleaned series
+contains \Sexpr{format(nrow(cu),big.mark=",")} observations spanning
+\Sexpr{format(min(cu$Date),"%d %B %Y")} to \Sexpr{format(max(cu$Date),"%d %B %Y")}.
+
+\subsection{Returns and Stationarity}
+Let $P_t$ denote the closing price on day $t$. The price level trends strongly and is
+non-stationary, so the analysis uses the continuously-compounded (log) return, expressed in
+percent,
+\begin{equation}
+  r_t = 100\times\ln\!\left(\frac{P_t}{P_{t-1}}\right).
+\end{equation}
+Stationarity is assessed with the Augmented Dickey--Fuller (ADF) test of Dickey and Fuller
+(1979), whose null hypothesis is a unit root, and the KPSS test of Kwiatkowski et al.\ (1992),
+whose null is stationarity.
+
+\subsection{The ARMA Model}
+An ARMA$(p,q)$ model for the return is
+\begin{equation}
+  r_t = \mu + \sum_{i=1}^{p}\phi_i\,r_{t-i} + \varepsilon_t + \sum_{j=1}^{q}\theta_j\,\varepsilon_{t-j},
+  \qquad \varepsilon_t \sim \text{i.i.d.}(0,\sigma^2).
+\end{equation}
+Candidate orders are read from the sample autocorrelation function (ACF) and partial
+autocorrelation function (PACF): an AR($p$) process produces a PACF that cuts off after lag
+$p$, and an MA($q$) process an ACF that cuts off after lag $q$ (Box \& Jenkins, 1976). Among
+competing specifications the preferred model minimises the Bayesian Information Criterion,
+$\text{BIC}=-2\ell+k\ln n$ (Schwarz, 1978), where $\ell$ is the maximised log-likelihood,
+$k$ the number of parameters and $n$ the sample size. The BIC is reported alongside Akaike's
+AIC (Akaike, 1974); BIC is preferred here because it penalises complexity more heavily and is
+consistent for the true order in large samples.
+
+\subsection{Diagnostics and Out-of-Sample Evaluation}
+An adequate model should leave white-noise residuals. This is tested with the Ljung--Box
+$Q$-statistic (Ljung \& Box, 1978) on the residuals and on the squared residuals, the latter
+detecting ARCH effects; the ARCH-LM test of Engle (1982) provides a second check, and the
+Jarque--Bera test (Jarque \& Bera, 1987) examines normality. Forecast performance is judged
+out of sample: the model is estimated on all but the final \Sexpr{H} trading days and used to
+produce one-step-ahead forecasts over that hold-out window, which are compared against a
+naive random-walk benchmark ($\hat P_t = P_{t-1}$) using the root-mean-square error (RMSE)
+and mean absolute error (MAE).
+
+\subsection{The GARCH Extension}
+To capture volatility clustering, the constant-variance assumption is relaxed by letting the
+conditional variance $\sigma_t^2$ follow a GARCH(1,1) process (Bollerslev, 1986):
+\begin{equation}
+  \sigma_t^2 = \omega + \alpha_1\,\varepsilon_{t-1}^2 + \beta_1\,\sigma_{t-1}^2,
+  \qquad \omega>0,\;\alpha_1,\beta_1\ge 0,\;\alpha_1+\beta_1<1,
+\end{equation}
+with the AR(2) mean retained from Section~3. The quantity $\alpha_1+\beta_1$ measures the
+persistence of volatility shocks. To accommodate the heavy tails of commodity returns, the
+innovations are assumed to follow a standardised Student-$t$ distribution, whose
+degrees-of-freedom parameter is estimated jointly with the model.
+
+\subsection{Software}
+All computation uses R: \texttt{readxl} for data import, \texttt{tseries} for the unit-root
+and normality tests, \texttt{forecast} for ARMA estimation and forecasting, \texttt{lmtest}
+and \texttt{FinTS} for diagnostics, and \texttt{rugarch} for the GARCH model.
+
+% ============================ CHAPTER 3 ============================
+\section{Results: The ARMA Model}
+
+\subsection{Price Behaviour and Returns}
+Figure~\ref{fig:level} plots the price level and its logarithm. The series wanders without
+reverting to a fixed mean --- the visual signature of non-stationarity --- with the
+2008 commodity crash, the 2011 and 2021--2024 booms all clearly visible. Figure~\ref{fig:ret}
+shows the log-returns, which fluctuate around zero but in distinct calm and turbulent
+episodes: the hallmark of volatility clustering that motivates Section~4.
+
+<<fig-level, fig.cap='Daily copper price (top) and log price (bottom). The wandering, non-mean-reverting level is characteristic of a non-stationary, near-random-walk series.\\label{fig:level}', fig.height=4.2>>=
+par(mfrow=c(2,1), mar=c(2.4,4,1.8,1), cex=0.8)
+plot(cu$Date, price, type="l", col="#c2410c", lwd=1,
+     main="Daily copper price (USD/tonne)", xlab="", ylab="USD/tonne")
+plot(cu$Date, log(price), type="l", col="#1b3a2d", lwd=1,
+     main="Log price", xlab="", ylab="log(USD/tonne)")
+@
+
+<<fig-ret, fig.cap='Daily log-returns (\\%). Volatility arrives in clusters --- calm stretches punctuated by turbulent ones --- which a constant-variance ARMA model cannot represent.\\label{fig:ret}', fig.height=2.6>>=
+par(mar=c(2.4,4,1.2,1), cex=0.8)
+plot(cu$Date[-1], ret, type="l", col="#c2410c", lwd=0.5, xlab="", ylab="% return")
+abline(h=0, col="grey60")
+@
+
+\subsection{Stationarity Tests}
+The tests confirm the visual impression. On the price level the ADF test fails to reject a
+unit root ($p=\Sexpr{round(adf_lvl$p.value,3)}$) while KPSS rejects stationarity
+($p\le\Sexpr{round(kpss_lvl$p.value,3)}$). On the returns the verdict reverses: ADF strongly
+rejects a unit root ($p\le\Sexpr{round(adf_ret$p.value,3)}$) and KPSS does not reject
+stationarity ($p\ge\Sexpr{round(kpss_ret$p.value,2)}$). The returns are therefore stationary
+and suitable for ARMA modelling; equivalently, the log price is integrated of order one,
+$I(1)$.
+
+\subsection{Order Selection: ACF, PACF and BIC}
+The ACF and PACF of the returns (Figure~\ref{fig:acf}) both show significant spikes at lags 1
+and 2 that then die away --- a pattern consistent with a low-order autoregression. The BIC
+grid search over $p,q\in\{0,\dots,5\}$ confirms this: the minimum BIC is attained by the
+AR(2) specification, ARMA(2,0). The eight best models are listed below (R output).
+
+<<fig-acf, fig.cap='ACF and PACF of daily log-returns. Significant spikes at lags 1--2 in both functions point to a low-order AR process.\\label{fig:acf}', fig.height=4.0>>=
+par(mfrow=c(2,1), mar=c(3.4,4,2,1), cex=0.8)
+Acf(ret, lag.max=30, main="ACF of log-returns")
+Pacf(ret, lag.max=30, main="PACF of log-returns")
+@
+
+<<bic-grid, echo=TRUE>>=
+head(gres[order(gres$BIC), ], 8)   # candidate ARMA orders ranked by BIC (lowest = best)
+@
+
+\subsection{The Fitted ARMA(2,0) Model}
+Estimating the selected model gives the coefficients below. Both autoregressive terms are
+highly significant ($p<10^{-9}$); the constant (mean daily return) is not significantly
+different from zero, consistent with prices that drift only weakly.
+
+<<arma-fit, echo=TRUE>>=
+fit <- Arima(ret, order = c(2,0,0), include.mean = TRUE)
+coeftest(fit)
+@
+
+\subsection{Residual Diagnostics}
+The model captures the \emph{linear} dependence in returns: the Ljung--Box test on the
+residuals is insignificant at the 5\% level ($Q_{20}$ $p=\Sexpr{round(lb_r$p.value,3)}$), so
+no autocorrelation remains in the mean. However, two assumptions fail decisively. The
+Ljung--Box test on the \emph{squared} residuals and the ARCH-LM test both reject the null of
+no conditional heteroskedasticity at any conventional level
+($p<10^{-10}$), and the
+Jarque--Bera test rejects normality. In words, the ARMA residuals are uncorrelated but
+\emph{not} independent --- their variance is strongly predictable and their distribution is
+heavy-tailed (Figure~\ref{fig:resid}).
+
+<<resid-diag, echo=TRUE>>=
+Box.test(residuals(fit), lag = 20, type = "Ljung-Box", fitdf = 2)  # autocorrelation in mean
+Box.test(residuals(fit)^2, lag = 20, type = "Ljung-Box")           # ARCH effects (squared)
+ArchTest(residuals(fit), lags = 12)                                # Engle's ARCH-LM test
+@
+
+<<fig-resid, fig.cap='ARMA(2,0) residuals. The squared-residual ACF (bottom) shows large, slowly-decaying autocorrelation --- undeniable ARCH that the homoskedastic model ignores.\\label{fig:resid}', fig.height=4.0>>=
+par(mfrow=c(2,1), mar=c(3.4,4,2,1), cex=0.8)
+plot(cu$Date[-1], residuals(fit), type="l", col="#c2410c", lwd=0.4,
+     main="ARMA(2,0) residuals", xlab="", ylab="resid")
+Acf(residuals(fit)^2, lag.max=30, main="ACF of squared residuals (ARCH signature)")
+@
+
+\subsection{Out-of-Sample Forecast Accuracy}
+The model was re-estimated on all but the final \Sexpr{H} trading days and used to produce
+one-step-ahead forecasts over that window. The point-forecast accuracy is essentially
+identical to --- and marginally worse than --- a naive random walk, and the direction of the
+next day's move is called correctly only \Sexpr{round(dir_acc,1)}\% of the time
+(no better than a coin toss). This is the expected result for a near-efficient price: the
+small but statistically significant AR(2) structure is \emph{not} economically exploitable
+for point forecasting.
+
+<<bt-table, results='asis'>>=
+library(knitr)
+print(kable(bt, format="latex", booktabs=TRUE, digits=2,
+            caption="Out-of-sample one-step forecast accuracy over the final 252 trading days (price level, USD/tonne). Lower is better.",
+            col.names=c("Model","RMSE","MAE")))
+@
+
+<<fig-bt, fig.cap='Actual vs.\\ one-step ARMA forecast over the hold-out window. The forecast tracks the lagged price so closely that it is visually indistinguishable from a random walk.\\label{fig:bt}', fig.height=2.7>>=
+par(mar=c(3,4,1.4,1), cex=0.8)
+d <- cu$Date[te+1]
+plot(d, p_act, type="l", col="#1b3a2d", lwd=1.2, xlab="", ylab="USD/tonne",
+     main="Hold-out: actual vs ARMA(2,0) one-step forecast")
+lines(d, p_arma, col="#c2410c", lwd=1, lty=2)
+legend("topleft", c("Actual","ARMA(2,0) forecast"), col=c("#1b3a2d","#c2410c"),
+       lty=c(1,2), lwd=c(1.2,1), bty="n", cex=0.85)
+@
+
+% ============================ CHAPTER 4 ============================
+\section{The Improved Model: ARMA--GARCH}
+
+\subsection{Motivation}
+Section~3.5 established that the ARMA(2,0) residuals violate the constant-variance and
+normality assumptions: there is pronounced volatility clustering and the tails are far
+heavier than Gaussian. Ignoring this has real consequences. The standard errors in the ARMA
+output assume homoskedasticity, so the reported significance and any confidence or
+value-at-risk intervals are distorted; and a Gaussian interval forecast will be far too wide
+in calm periods and far too narrow in turbulent ones. The remedy is to model the conditional
+variance explicitly. The AR(2) mean is retained and a GARCH(1,1) variance with Student-$t$
+innovations is added.
+
+\subsection{The Fitted ARMA(2,0)--GARCH(1,1) Model}
+The estimated parameters are shown below (R output from \texttt{rugarch}). All variance
+parameters are highly significant. Two features stand out. First, volatility is highly
+persistent: $\alpha_1+\beta_1=\Sexpr{round(pers,3)}$, close to one, meaning shocks to
+volatility decay only slowly. Second, the estimated Student-$t$ degrees of freedom is
+$\approx\Sexpr{round(tdf,1)}$ --- well below the $\sim$30 at which the $t$ becomes
+effectively normal --- formally confirming heavy tails. Notably, once the variance is modelled
+the second AR term shrinks toward insignificance, indicating that part of the apparent
+mean-dependence in Section~3 was in fact unmodelled heteroskedasticity.
+
+<<garch-fit, echo=TRUE>>=
+spec <- ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1,1)),
+                   mean.model     = list(armaOrder = c(2,0), include.mean = TRUE),
+                   distribution.model = "std")            # Student-t innovations
+fg <- ugarchfit(spec, data = ret, solver = "hybrid")
+round(fg@fit$matcoef, 6)
+@
+
+\subsection{Model Comparison}
+Table~\ref{tab:cmp} places the two models side by side. The GARCH extension raises the
+log-likelihood from \Sexpr{format(round(as.numeric(logLik(fit))),big.mark=",")} to
+\Sexpr{format(round(LLg),big.mark=",")} and, despite its three extra parameters, lowers the
+BIC by almost \Sexpr{format(round(BIC(fit)-BICg, -2),big.mark=",")} points --- an overwhelming
+margin (a BIC difference above 10 is regarded as decisive). Crucially, the diagnostic
+columns flip from rejection to non-rejection: the ARCH effects and squared-residual
+autocorrelation that contaminated the ARMA residuals are absent from the GARCH
+\emph{standardised} residuals.
+
+<<cmp-table, results='asis'>>=
+ct <- cmp
+ct$logLik <- round(ct$logLik); ct$AIC <- round(ct$AIC); ct$BIC <- round(ct$BIC)
+ct$LB_z2_p <- formatC(ct$LB_z2_p, format="g", digits=2)
+ct$ARCH_p  <- formatC(ct$ARCH_p,  format="g", digits=2)
+print(kable(ct, format="latex", booktabs=TRUE,
+            caption="\\label{tab:cmp}ARMA vs.\\ ARMA-GARCH. The GARCH model wins decisively on fit (logLik, AIC, BIC) and is the only one whose (standardised) residuals pass the no-ARCH tests.",
+            col.names=c("Model","k","logLik","AIC","BIC","LB($z^2$) p","ARCH-LM p"),
+            align=c("l","c","r","r","r","r","r")))
+@
+
+\subsection{What the GARCH Model Reveals}
+Figure~\ref{fig:vol} plots the estimated conditional volatility $\sigma_t$. Far from being
+constant (the flat line the ARMA model implicitly assumes), daily volatility ranges from
+under 1\% in calm periods to over 4\% during the 2008 crisis and the 2020 and 2022 shocks.
+This time-varying risk is the single most important feature of the data, and it is invisible
+to the ARMA model.
+
+<<fig-vol, fig.cap='GARCH(1,1) conditional volatility (annualised-scale daily \\%). Risk is anything but constant; the ARMA model assumes the flat dashed line.\\label{fig:vol}', fig.height=2.7>>=
+par(mar=c(3,4,1.4,1), cex=0.8)
+plot(cu$Date[-1], cv, type="l", col="#c2410c", lwd=0.7, xlab="", ylab="cond. SD (%/day)",
+     main="Estimated conditional volatility")
+abline(h=sd(ret), col="#1b3a2d", lty=2)
+legend("topright", c("GARCH conditional SD","constant SD (ARMA assumption)"),
+       col=c("#c2410c","#1b3a2d"), lty=c(1,2), lwd=c(0.9,1), bty="n", cex=0.8)
+@
+
+Figure~\ref{fig:zdiag} confirms the model is now adequate. The ACF of the squared
+standardised residuals is flat --- the ARCH has been absorbed --- and the QQ-plot against the
+Student-$t$ shows the heavy tails are well described once the right innovation distribution is
+used.
+
+<<fig-zdiag, fig.cap='Standardised-residual diagnostics. Left: squared standardised residuals show no remaining ARCH (contrast Figure~4). Right: QQ-plot against the fitted Student-$t$.\\label{fig:zdiag}', fig.height=2.9>>=
+par(mfrow=c(1,2), mar=c(3.6,3.8,2,1), cex=0.8)
+Acf(z^2, lag.max=30, main="ACF of squared std. residuals")
+qd <- qt(ppoints(length(z)), df=tdf)/sqrt(tdf/(tdf-2))
+qqplot(qd, sort(z), pch=20, cex=0.3, col="#c2410c",
+       main="QQ vs Student-t", xlab="theoretical t quantile", ylab="std. residual")
+abline(0,1,col="#1b3a2d")
+@
+
+\subsection{Why It Is an Improvement}
+The GARCH extension improves on the pure ARMA model in four concrete ways.
+\begin{enumerate}[nosep,leftmargin=1.4em]
+  \item \textbf{Valid inference.} By modelling the heteroskedasticity rather than ignoring it,
+        the parameter standard errors become reliable, so statements about which terms matter
+        are trustworthy.
+  \item \textbf{Honest, time-varying uncertainty.} The ARMA model attaches the \emph{same}
+        forecast interval to every day; the GARCH model widens its intervals in turbulent
+        regimes and narrows them in calm ones, matching how copper risk actually behaves.
+  \item \textbf{Better density and risk forecasts.} Because it captures volatility clustering
+        and fat tails, the model produces accurate value-at-risk and other tail-risk measures
+        --- exactly what a treasury or mining-finance desk needs --- where the Gaussian ARMA
+        would understate the probability of large losses.
+  \item \textbf{Decisive statistical superiority.} It is preferred by both AIC and BIC by a
+        wide margin and is the only specification whose residuals pass every diagnostic.
+\end{enumerate}
+A caveat preserves the honesty of the analysis: the GARCH layer does \emph{not} make the
+copper price more predictable \emph{in the mean} --- the point forecast remains close to a
+random walk, as Section~3.6 showed. What it makes predictable, and predictable well, is the
+\emph{risk}. For copper, that is the quantity worth forecasting.
+
+% ============================ CHAPTER 5 ============================
+\section{Conclusions and Recommendations}
+
+\subsection{Summary of Findings}
+Daily copper prices over 2000--2025 are non-stationary and behave, in their level, much like a
+random walk. The log-returns are stationary, and the ACF, PACF and BIC jointly select an
+AR(2) model for the conditional mean. That model is statistically valid in the mean but
+inadequate overall: its residuals exhibit strong volatility clustering and heavy tails, and
+out of sample it does not beat a naive random walk. Extending it to an
+ARMA(2,0)--GARCH(1,1) model with Student-$t$ innovations resolves these defects, with a far
+higher likelihood, decisively lower information criteria, clean standardised residuals,
+volatility persistence of \Sexpr{round(pers,3)} and tail thickness corresponding to about
+\Sexpr{round(tdf,1)} degrees of freedom.
+
+\subsection{Conclusions}
+The copper price is approximately weak-form efficient in the mean: past prices carry little
+exploitable information about the \emph{direction} of future prices. Its variance, by
+contrast, is strongly and persistently predictable. Any serious model of copper-price
+behaviour must therefore model the conditional variance; an ARMA model alone is incomplete.
+
+\subsection{Recommendations}
+For analysts and risk managers, copper-price risk should be modelled with a GARCH-type
+specification and a heavy-tailed innovation distribution, and value-at-risk should be computed
+from the conditional rather than the unconditional variance. For forecasting the price level
+itself, a random walk (optionally with drift) is a hard-to-beat benchmark, so resources are
+better spent on volatility and scenario analysis than on chasing point forecasts. For
+policymakers reliant on copper revenue, the persistence of volatility implies that price
+shocks are protracted, strengthening the case for stabilisation buffers.
+
+\subsection{Areas for Further Research}
+Natural extensions include asymmetric volatility models (EGARCH, GJR-GARCH) to test whether
+price drops raise volatility more than equivalent rises; multivariate or ARIMAX models that
+bring in the US dollar, Chinese demand and inventory data; regime-switching models for the
+distinct boom and crash phases visible in Figure~\ref{fig:level}; and longer-horizon density
+forecasts for budgeting applications.
+
+% ============================ REFERENCES ============================
+\section*{References}
+\addcontentsline{toc}{section}{References}
+\small
+\begin{list}{}{\setlength{\leftmargin}{1.4em}\setlength{\itemindent}{-1.4em}\setlength{\itemsep}{0.35em}}
+\item Akaike, H. (1974). A new look at the statistical model identification. \textit{IEEE Transactions on Automatic Control}, 19(6), 716--723.
+\item Bollerslev, T. (1986). Generalized autoregressive conditional heteroskedasticity. \textit{Journal of Econometrics}, 31(3), 307--327.
+\item Box, G. E. P., \& Jenkins, G. M. (1976). \textit{Time Series Analysis: Forecasting and Control}. San Francisco: Holden-Day.
+\item Brooks, C. (2019). \textit{Introductory Econometrics for Finance} (4th ed.). Cambridge: Cambridge University Press.
+\item Dickey, D. A., \& Fuller, W. A. (1979). Distribution of the estimators for autoregressive time series with a unit root. \textit{Journal of the American Statistical Association}, 74(366), 427--431.
+\item Engle, R. F. (1982). Autoregressive conditional heteroscedasticity with estimates of the variance of United Kingdom inflation. \textit{Econometrica}, 50(4), 987--1007.
+\item Hyndman, R. J., \& Athanasopoulos, G. (2021). \textit{Forecasting: Principles and Practice} (3rd ed.). Melbourne: OTexts.
+\item Jarque, C. M., \& Bera, A. K. (1987). A test for normality of observations and regression residuals. \textit{International Statistical Review}, 55(2), 163--172.
+\item Kwiatkowski, D., Phillips, P. C. B., Schmidt, P., \& Shin, Y. (1992). Testing the null hypothesis of stationarity against the alternative of a unit root. \textit{Journal of Econometrics}, 54(1--3), 159--178.
+\item Ljung, G. M., \& Box, G. E. P. (1978). On a measure of lack of fit in time series models. \textit{Biometrika}, 65(2), 297--303.
+\item Schwarz, G. (1978). Estimating the dimension of a model. \textit{Annals of Statistics}, 6(2), 461--464.
+\item Tsay, R. S. (2010). \textit{Analysis of Financial Time Series} (3rd ed.). Hoboken: Wiley.
+\item World Bank. (2023). \textit{Zambia Economic Brief}. Washington, DC: World Bank.
+\end{list}
+\normalsize
+
+% ============================ APPENDIX ============================
+\newpage
+\appendix
+\section{Full R Output}
+This appendix reproduces the key console output verbatim for reference and replication.
+
+\subsection{Stationarity tests}
+<<app-adf, echo=TRUE>>=
+adf.test(price)      # level: H0 = unit root (non-stationary)
+adf.test(ret)        # returns
+kpss.test(ret)       # returns: H0 = stationary
+@
+
+\subsection{Fitted ARMA(2,0)}
+<<app-arma, echo=TRUE>>=
+fit
+@
+
+\subsection{ARMA(2,0)-GARCH(1,1)-t: variance equation and diagnostics}
+<<app-garch, echo=TRUE>>=
+infocriteria(fg)                                   # per-observation IC (rugarch)
+cat(sprintf("Volatility persistence a1+b1 = %.4f\n", pers))
+cat(sprintf("Student-t d.f. (shape)       = %.2f\n", tdf))
+Box.test(z, 20, type="Ljung-Box")                  # std resid: autocorrelation
+Box.test(z^2, 20, type="Ljung-Box")                # std resid^2: remaining ARCH
+ArchTest(z, 12)                                    # std resid: ARCH-LM
+@
+
+\vfill
+\begin{center}\small\color{accent}\rule{0.5\linewidth}{0.4pt}\\[0.4em]
+Code and data: \url{https://github.com/CCheelo/copper-forecasting}
+\end{center}
+
+\end{document}
